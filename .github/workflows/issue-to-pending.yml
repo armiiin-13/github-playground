@@ -1,4 +1,4 @@
-name: Move referenced issues to In review
+name: Move referenced subissue to In review
 
 on:
   push:
@@ -12,15 +12,15 @@ permissions:
 env:
   PROJECT_OWNER: ${{ github.repository_owner }}
 
-  # Deja aquí el número que ya estás usando.
+  # Pon aquí el número real de tu proyecto.
   PROJECT_NUMBER: "3"
 
   STATUS_FIELD_NAME: "Status"
   IN_REVIEW_OPTION_NAME: "In review"
 
 jobs:
-  move-issues-to-in-review:
-    name: Move issues and subissues to In review
+  move-subissues-to-in-review:
+    name: Move referenced subissues to In review
     runs-on: ubuntu-latest
 
     if: github.event.deleted == false
@@ -29,7 +29,11 @@ jobs:
       GH_TOKEN: ${{ secrets.PROJECT_TOKEN }}
 
     steps:
-      - name: Find issues referenced by commits
+      # ---------------------------------------------------------
+      # Detectar Closes #N, Fixes #N o Resolves #N
+      # en los commits enviados con el push.
+      # ---------------------------------------------------------
+      - name: Find referenced issues
         id: referenced-issues
         shell: bash
         run: |
@@ -45,10 +49,6 @@ jobs:
 
           current_repository = os.environ["GITHUB_REPOSITORY"].lower()
 
-          # Reconoce:
-          # Closes #2
-          # Fixes: #2
-          # Resolves armiiin-13/github-playground#2
           pattern = re.compile(
               r"""
               \b
@@ -94,7 +94,10 @@ jobs:
 
           echo "found=true" >> "$GITHUB_OUTPUT"
 
-      - name: Get personal project data
+      # ---------------------------------------------------------
+      # Obtener el Project, el campo Status y la opción In review.
+      # ---------------------------------------------------------
+      - name: Get project data
         if: steps.referenced-issues.outputs.found == 'true'
         id: project
         shell: bash
@@ -137,7 +140,7 @@ jobs:
             | jq -c '.data.user.projectV2'
           )"
 
-          if [[ "$PROJECT_JSON" == "null" ]]; then
+          if [[ -z "$PROJECT_JSON" || "$PROJECT_JSON" == "null" ]]; then
             echo "::error::Personal project ${PROJECT_OWNER}/${PROJECT_NUMBER} not found."
             exit 1
           fi
@@ -191,7 +194,11 @@ jobs:
             echo "in_review_option_id=$IN_REVIEW_OPTION_ID"
           } >> "$GITHUB_OUTPUT"
 
-      - name: Move issues and subissues to In review
+      # ---------------------------------------------------------
+      # Comprobar que cada issue referenciada tiene padre.
+      # Solo entonces moverla a In review.
+      # ---------------------------------------------------------
+      - name: Move referenced subissues to In review
         if: steps.referenced-issues.outputs.found == 'true'
         shell: bash
         env:
@@ -213,8 +220,12 @@ jobs:
             repository(owner: $owner, name: $repository) {
               issue(number: $number) {
                 number
-                state
                 url
+
+                parent {
+                  number
+                  title
+                }
 
                 projectItems(first: 100) {
                   nodes {
@@ -225,106 +236,50 @@ jobs:
                     }
                   }
                 }
-
-                subIssues(first: 100) {
-                  nodes {
-                    number
-                    state
-                    url
-
-                    repository {
-                      nameWithOwner
-                    }
-                  }
-                }
               }
             }
           }
           GRAPHQL
           )
 
-          declare -a QUEUE=()
-
           while IFS= read -r ISSUE_NUMBER; do
             [[ -z "$ISSUE_NUMBER" ]] && continue
 
-            ISSUE_URL="https://github.com/${GITHUB_REPOSITORY}/issues/${ISSUE_NUMBER}"
+            echo "Processing issue #${ISSUE_NUMBER}..."
 
-            QUEUE+=(
-              "${REPOSITORY_OWNER}|${REPOSITORY_NAME}|${ISSUE_NUMBER}|${ISSUE_URL}"
-            )
-          done < /tmp/issues.txt
-
-          declare -A SEEN=()
-
-          while (( ${#QUEUE[@]} > 0 )); do
-            CURRENT="${QUEUE[0]}"
-            QUEUE=("${QUEUE[@]:1}")
-
-            IFS='|' read -r OWNER REPOSITORY NUMBER URL <<< "$CURRENT"
-
-            ISSUE_KEY="${OWNER}/${REPOSITORY}#${NUMBER}"
-
-            if [[ -n "${SEEN[$ISSUE_KEY]:-}" ]]; then
-              continue
-            fi
-
-            SEEN["$ISSUE_KEY"]=1
-
-            echo "Processing ${ISSUE_KEY}..."
-
-            if ! ISSUE_JSON="$(
+            ISSUE_JSON="$(
               gh api graphql \
                 -f query="$ISSUE_QUERY" \
-                -f owner="$OWNER" \
-                -f repository="$REPOSITORY" \
-                -F number="$NUMBER"
-            )"; then
-              echo "::warning::Could not read ${ISSUE_KEY}."
-              continue
-            fi
+                -f owner="$REPOSITORY_OWNER" \
+                -f repository="$REPOSITORY_NAME" \
+                -F number="$ISSUE_NUMBER"
+            )"
 
             ISSUE_EXISTS="$(
               jq -r '.data.repository.issue != null' <<< "$ISSUE_JSON"
             )"
 
             if [[ "$ISSUE_EXISTS" != "true" ]]; then
-              echo "::warning::Issue ${ISSUE_KEY} does not exist."
+              echo "::warning::Issue #${ISSUE_NUMBER} does not exist."
               continue
             fi
 
-            # Añade todas sus subissues a la cola.
-            # Al procesarlas también se encontrarán sus propias subissues.
-            while IFS=$'\t' read -r CHILD_REPOSITORY CHILD_NUMBER CHILD_URL; do
-              [[ -z "$CHILD_REPOSITORY" ]] && continue
-
-              CHILD_OWNER="${CHILD_REPOSITORY%%/*}"
-              CHILD_REPOSITORY_NAME="${CHILD_REPOSITORY#*/}"
-
-              QUEUE+=(
-                "${CHILD_OWNER}|${CHILD_REPOSITORY_NAME}|${CHILD_NUMBER}|${CHILD_URL}"
-              )
-            done < <(
-              jq -r '
-                .data.repository.issue.subIssues.nodes[]?
-                | [
-                    .repository.nameWithOwner,
-                    (.number | tostring),
-                    .url
-                  ]
-                | @tsv
-              ' <<< "$ISSUE_JSON"
-            )
-
-            ISSUE_STATE="$(
-              jq -r '.data.repository.issue.state' <<< "$ISSUE_JSON"
+            PARENT_NUMBER="$(
+              jq -r '.data.repository.issue.parent.number // empty' \
+                <<< "$ISSUE_JSON"
             )"
 
-            # No sacar de Done una issue ya cerrada.
-            if [[ "$ISSUE_STATE" == "CLOSED" ]]; then
-              echo "${ISSUE_KEY} is closed; keeping its current status."
+            # No mover issues padre o issues independientes.
+            if [[ -z "$PARENT_NUMBER" ]]; then
+              echo "Issue #${ISSUE_NUMBER} is not a subissue; leaving it unchanged."
               continue
             fi
+
+            echo "Issue #${ISSUE_NUMBER} is a subissue of #${PARENT_NUMBER}."
+
+            ISSUE_URL="$(
+              jq -r '.data.repository.issue.url' <<< "$ISSUE_JSON"
+            )"
 
             PROJECT_ITEM_ID="$(
               jq -r \
@@ -339,20 +294,16 @@ jobs:
                 <<< "$ISSUE_JSON"
             )"
 
-            # Si una subissue no está todavía en el proyecto, la añade.
             if [[ -z "$PROJECT_ITEM_ID" ]]; then
-              echo "${ISSUE_KEY} is not in the project. Adding it..."
+              echo "Subissue #${ISSUE_NUMBER} is not in the project. Adding it..."
 
-              if ! PROJECT_ITEM_ID="$(
+              PROJECT_ITEM_ID="$(
                 gh project item-add "$PROJECT_NUMBER" \
                   --owner "$PROJECT_OWNER" \
-                  --url "$URL" \
+                  --url "$ISSUE_URL" \
                   --format json \
                   --jq '.id'
-              )"; then
-                echo "::warning::Could not add ${ISSUE_KEY} to the project."
-                continue
-              fi
+              )"
             fi
 
             gh project item-edit \
@@ -361,5 +312,6 @@ jobs:
               --field-id "$STATUS_FIELD_ID" \
               --single-select-option-id "$IN_REVIEW_OPTION_ID"
 
-            echo "${ISSUE_KEY} moved to '${IN_REVIEW_OPTION_NAME}'."
-          done
+            echo "Subissue #${ISSUE_NUMBER} moved to '${IN_REVIEW_OPTION_NAME}'."
+            echo "Parent issue #${PARENT_NUMBER} was not modified."
+          done < /tmp/issues.txt
