@@ -7,41 +7,35 @@ on:
 
 permissions:
   contents: read
+  issues: read
 
 env:
-  # Si el proyecto pertenece al mismo usuario u organización que el repo,
-  # puedes dejar esta línea como está.
   PROJECT_OWNER: ${{ github.repository_owner }}
 
-  # Número que aparece en la URL del proyecto:
-  # https://github.com/orgs/MI_ORG/projects/7 -> 7
+  # Deja aquí el número que ya estás usando.
   PROJECT_NUMBER: "3"
 
-  # Nombres exactos del campo y de la opción dentro del proyecto.
   STATUS_FIELD_NAME: "Status"
   IN_REVIEW_OPTION_NAME: "In review"
 
 jobs:
-  move-issues:
-    name: Move issues to In review
+  move-issues-to-in-review:
+    name: Move issues and subissues to In review
     runs-on: ubuntu-latest
 
-    # Evita ejecutar el job cuando se elimina una rama.
     if: github.event.deleted == false
 
     env:
-      # GITHUB_TOKEN no puede modificar Projects v2.
       GH_TOKEN: ${{ secrets.PROJECT_TOKEN }}
 
     steps:
-      - name: Find issues referenced by pushed commits
-        id: issues
+      - name: Find issues referenced by commits
+        id: referenced-issues
         shell: bash
         run: |
           set -euo pipefail
 
-          mapfile -t ISSUE_NUMBERS < <(
-            python3 <<'PY'
+          python3 <<'PY' > /tmp/issues.txt
           import json
           import os
           import re
@@ -51,10 +45,10 @@ jobs:
 
           current_repository = os.environ["GITHUB_REPOSITORY"].lower()
 
-          # Admite:
-          # Fixes #123
-          # Closes: #123
-          # RESOLVES owner/repository#123
+          # Reconoce:
+          # Closes #2
+          # Fixes: #2
+          # Resolves armiiin-13/github-playground#2
           pattern = re.compile(
               r"""
               \b
@@ -79,7 +73,6 @@ jobs:
               for match in pattern.finditer(message):
                   referenced_repository = match.group("repository")
 
-                  # Solo procesa issues del repositorio actual.
                   if (
                       referenced_repository is None
                       or referenced_repository.lower() == current_repository
@@ -89,36 +82,30 @@ jobs:
           for number in sorted(issue_numbers):
               print(number)
           PY
-          )
 
-          if (( ${#ISSUE_NUMBERS[@]} == 0 )); then
+          if [[ ! -s /tmp/issues.txt ]]; then
             echo "No closing issue references found."
             echo "found=false" >> "$GITHUB_OUTPUT"
             exit 0
           fi
 
-          echo "Issues found: ${ISSUE_NUMBERS[*]}"
+          echo "Referenced issues:"
+          cat /tmp/issues.txt
 
-          {
-            echo "found=true"
-            echo "numbers<<EOF"
-            printf '%s\n' "${ISSUE_NUMBERS[@]}"
-            echo "EOF"
-          } >> "$GITHUB_OUTPUT"
+          echo "found=true" >> "$GITHUB_OUTPUT"
 
-      - name: Move issues to In review
-        if: steps.issues.outputs.found == 'true'
+      - name: Get personal project data
+        if: steps.referenced-issues.outputs.found == 'true'
+        id: project
         shell: bash
-        env:
-          ISSUE_NUMBERS: ${{ steps.issues.outputs.numbers }}
         run: |
           set -euo pipefail
 
-          REPOSITORY_OWNER="${GITHUB_REPOSITORY%%/*}"
-          REPOSITORY_NAME="${GITHUB_REPOSITORY#*/}"
-
           PROJECT_QUERY=$(cat <<'GRAPHQL'
-          query($owner: String!, $number: Int!) {
+          query(
+            $owner: String!,
+            $number: Int!
+          ) {
             user(login: $owner) {
               projectV2(number: $number) {
                 id
@@ -151,7 +138,7 @@ jobs:
           )"
 
           if [[ "$PROJECT_JSON" == "null" ]]; then
-            echo "::error::Project $PROJECT_OWNER/$PROJECT_NUMBER not found."
+            echo "::error::Personal project ${PROJECT_OWNER}/${PROJECT_NUMBER} not found."
             exit 1
           fi
 
@@ -189,14 +176,33 @@ jobs:
           )"
 
           if [[ -z "$STATUS_FIELD_ID" ]]; then
-            echo "::error::Field '$STATUS_FIELD_NAME' not found."
+            echo "::error::Field '${STATUS_FIELD_NAME}' not found."
             exit 1
           fi
 
           if [[ -z "$IN_REVIEW_OPTION_ID" ]]; then
-            echo "::error::Option '$IN_REVIEW_OPTION_NAME' not found."
+            echo "::error::Option '${IN_REVIEW_OPTION_NAME}' not found."
             exit 1
           fi
+
+          {
+            echo "project_id=$PROJECT_ID"
+            echo "status_field_id=$STATUS_FIELD_ID"
+            echo "in_review_option_id=$IN_REVIEW_OPTION_ID"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Move issues and subissues to In review
+        if: steps.referenced-issues.outputs.found == 'true'
+        shell: bash
+        env:
+          PROJECT_ID: ${{ steps.project.outputs.project_id }}
+          STATUS_FIELD_ID: ${{ steps.project.outputs.status_field_id }}
+          IN_REVIEW_OPTION_ID: ${{ steps.project.outputs.in_review_option_id }}
+        run: |
+          set -euo pipefail
+
+          REPOSITORY_OWNER="${GITHUB_REPOSITORY%%/*}"
+          REPOSITORY_NAME="${GITHUB_REPOSITORY#*/}"
 
           ISSUE_QUERY=$(cat <<'GRAPHQL'
           query(
@@ -206,6 +212,10 @@ jobs:
           ) {
             repository(owner: $owner, name: $repository) {
               issue(number: $number) {
+                number
+                state
+                url
+
                 projectItems(first: 100) {
                   nodes {
                     id
@@ -215,56 +225,104 @@ jobs:
                     }
                   }
                 }
+
+                subIssues(first: 100) {
+                  nodes {
+                    number
+                    state
+                    url
+
+                    repository {
+                      nameWithOwner
+                    }
+                  }
+                }
               }
             }
           }
           GRAPHQL
           )
 
-          UPDATE_MUTATION=$(cat <<'GRAPHQL'
-          mutation(
-            $projectId: ID!,
-            $itemId: ID!,
-            $fieldId: ID!,
-            $optionId: String!
-          ) {
-            updateProjectV2ItemFieldValue(
-              input: {
-                projectId: $projectId
-                itemId: $itemId
-                fieldId: $fieldId
-                value: {
-                  singleSelectOptionId: $optionId
-                }
-              }
-            ) {
-              projectV2Item {
-                id
-              }
-            }
-          }
-          GRAPHQL
-          )
+          declare -a QUEUE=()
 
           while IFS= read -r ISSUE_NUMBER; do
             [[ -z "$ISSUE_NUMBER" ]] && continue
 
-            echo "Processing issue #$ISSUE_NUMBER..."
+            ISSUE_URL="https://github.com/${GITHUB_REPOSITORY}/issues/${ISSUE_NUMBER}"
 
-            ISSUE_JSON="$(
+            QUEUE+=(
+              "${REPOSITORY_OWNER}|${REPOSITORY_NAME}|${ISSUE_NUMBER}|${ISSUE_URL}"
+            )
+          done < /tmp/issues.txt
+
+          declare -A SEEN=()
+
+          while (( ${#QUEUE[@]} > 0 )); do
+            CURRENT="${QUEUE[0]}"
+            QUEUE=("${QUEUE[@]:1}")
+
+            IFS='|' read -r OWNER REPOSITORY NUMBER URL <<< "$CURRENT"
+
+            ISSUE_KEY="${OWNER}/${REPOSITORY}#${NUMBER}"
+
+            if [[ -n "${SEEN[$ISSUE_KEY]:-}" ]]; then
+              continue
+            fi
+
+            SEEN["$ISSUE_KEY"]=1
+
+            echo "Processing ${ISSUE_KEY}..."
+
+            if ! ISSUE_JSON="$(
               gh api graphql \
                 -f query="$ISSUE_QUERY" \
-                -f owner="$REPOSITORY_OWNER" \
-                -f repository="$REPOSITORY_NAME" \
-                -F number="$ISSUE_NUMBER"
-            )"
+                -f owner="$OWNER" \
+                -f repository="$REPOSITORY" \
+                -F number="$NUMBER"
+            )"; then
+              echo "::warning::Could not read ${ISSUE_KEY}."
+              continue
+            fi
 
             ISSUE_EXISTS="$(
               jq -r '.data.repository.issue != null' <<< "$ISSUE_JSON"
             )"
 
             if [[ "$ISSUE_EXISTS" != "true" ]]; then
-              echo "::warning::Issue #$ISSUE_NUMBER does not exist."
+              echo "::warning::Issue ${ISSUE_KEY} does not exist."
+              continue
+            fi
+
+            # Añade todas sus subissues a la cola.
+            # Al procesarlas también se encontrarán sus propias subissues.
+            while IFS=$'\t' read -r CHILD_REPOSITORY CHILD_NUMBER CHILD_URL; do
+              [[ -z "$CHILD_REPOSITORY" ]] && continue
+
+              CHILD_OWNER="${CHILD_REPOSITORY%%/*}"
+              CHILD_REPOSITORY_NAME="${CHILD_REPOSITORY#*/}"
+
+              QUEUE+=(
+                "${CHILD_OWNER}|${CHILD_REPOSITORY_NAME}|${CHILD_NUMBER}|${CHILD_URL}"
+              )
+            done < <(
+              jq -r '
+                .data.repository.issue.subIssues.nodes[]?
+                | [
+                    .repository.nameWithOwner,
+                    (.number | tostring),
+                    .url
+                  ]
+                | @tsv
+              ' <<< "$ISSUE_JSON"
+            )
+
+            ISSUE_STATE="$(
+              jq -r '.data.repository.issue.state' <<< "$ISSUE_JSON"
+            )"
+
+            # No sacar de Done una issue ya cerrada.
+            if [[ "$ISSUE_STATE" == "CLOSED" ]]; then
+              echo "${ISSUE_KEY} is closed; keeping its current status."
               continue
             fi
 
@@ -272,26 +330,36 @@ jobs:
               jq -r \
                 --arg project_id "$PROJECT_ID" \
                 '
-                .data.repository.issue.projectItems.nodes[]
-                | select(.project.id == $project_id)
-                | .id
+                [
+                  .data.repository.issue.projectItems.nodes[]?
+                  | select(.project.id == $project_id)
+                  | .id
+                ][0] // empty
                 ' \
-                <<< "$ISSUE_JSON" \
-              | head -n 1
+                <<< "$ISSUE_JSON"
             )"
 
+            # Si una subissue no está todavía en el proyecto, la añade.
             if [[ -z "$PROJECT_ITEM_ID" ]]; then
-              echo "::warning::Issue #$ISSUE_NUMBER is not in project $PROJECT_NUMBER."
-              continue
+              echo "${ISSUE_KEY} is not in the project. Adding it..."
+
+              if ! PROJECT_ITEM_ID="$(
+                gh project item-add "$PROJECT_NUMBER" \
+                  --owner "$PROJECT_OWNER" \
+                  --url "$URL" \
+                  --format json \
+                  --jq '.id'
+              )"; then
+                echo "::warning::Could not add ${ISSUE_KEY} to the project."
+                continue
+              fi
             fi
 
-            gh api graphql \
-              -f query="$UPDATE_MUTATION" \
-              -f projectId="$PROJECT_ID" \
-              -f itemId="$PROJECT_ITEM_ID" \
-              -f fieldId="$STATUS_FIELD_ID" \
-              -f optionId="$IN_REVIEW_OPTION_ID" \
-              --silent
+            gh project item-edit \
+              --id "$PROJECT_ITEM_ID" \
+              --project-id "$PROJECT_ID" \
+              --field-id "$STATUS_FIELD_ID" \
+              --single-select-option-id "$IN_REVIEW_OPTION_ID"
 
-            echo "Issue #$ISSUE_NUMBER moved to '$IN_REVIEW_OPTION_NAME'."
-          done <<< "$ISSUE_NUMBERS"
+            echo "${ISSUE_KEY} moved to '${IN_REVIEW_OPTION_NAME}'."
+          done
