@@ -25,7 +25,7 @@ env:
 
   STATUS_FIELD_NAME: "Status"
   READY_OPTION_NAME: "Ready"
-  IN_PROGRESS_OPTION_NAME: "In Progress"
+  IN_PROGRESS_OPTION_NAME: "In progress"
 
 jobs:
   update-project-status:
