@@ -1,0 +1,318 @@
+name: Move referenced issues to In review
+
+on:
+  push:
+    branches-ignore:
+      - main
+
+permissions:
+  contents: read
+
+env:
+  # Si el proyecto pertenece al mismo usuario u organización que el repo,
+  # puedes dejar esta línea como está.
+  PROJECT_OWNER: ${{ github.repository_owner }}
+
+  # Número que aparece en la URL del proyecto:
+  # https://github.com/orgs/MI_ORG/projects/7 -> 7
+  PROJECT_NUMBER: "3"
+
+  # Nombres exactos del campo y de la opción dentro del proyecto.
+  STATUS_FIELD_NAME: "Status"
+  IN_REVIEW_OPTION_NAME: "In review"
+
+jobs:
+  move-issues:
+    name: Move issues to In review
+    runs-on: ubuntu-latest
+
+    # Evita ejecutar el job cuando se elimina una rama.
+    if: github.event.deleted == false
+
+    env:
+      # GITHUB_TOKEN no puede modificar Projects v2.
+      GH_TOKEN: ${{ secrets.PROJECT_TOKEN }}
+
+    steps:
+      - name: Find issues referenced by pushed commits
+        id: issues
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          mapfile -t ISSUE_NUMBERS < <(
+            python3 <<'PY'
+          import json
+          import os
+          import re
+
+          with open(os.environ["GITHUB_EVENT_PATH"], encoding="utf-8") as file:
+              event = json.load(file)
+
+          current_repository = os.environ["GITHUB_REPOSITORY"].lower()
+
+          # Admite:
+          # Fixes #123
+          # Closes: #123
+          # RESOLVES owner/repository#123
+          pattern = re.compile(
+              r"""
+              \b
+              (?:
+                  close[sd]?
+                | fix(?:e[sd])?
+                | resolve[sd]?
+              )
+              \s*:?\s*
+              (?:(?P<repository>[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+))?
+              \#(?P<number>\d+)
+              \b
+              """,
+              re.IGNORECASE | re.VERBOSE,
+          )
+
+          issue_numbers = set()
+
+          for commit in event.get("commits", []):
+              message = commit.get("message", "")
+
+              for match in pattern.finditer(message):
+                  referenced_repository = match.group("repository")
+
+                  # Solo procesa issues del repositorio actual.
+                  if (
+                      referenced_repository is None
+                      or referenced_repository.lower() == current_repository
+                  ):
+                      issue_numbers.add(int(match.group("number")))
+
+          for number in sorted(issue_numbers):
+              print(number)
+          PY
+          )
+
+          if (( ${#ISSUE_NUMBERS[@]} == 0 )); then
+            echo "No closing issue references found."
+            echo "found=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          echo "Issues found: ${ISSUE_NUMBERS[*]}"
+
+          {
+            echo "found=true"
+            echo "numbers<<EOF"
+            printf '%s\n' "${ISSUE_NUMBERS[@]}"
+            echo "EOF"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Move issues to In review
+        if: steps.issues.outputs.found == 'true'
+        shell: bash
+        env:
+          ISSUE_NUMBERS: ${{ steps.issues.outputs.numbers }}
+        run: |
+          set -euo pipefail
+
+          REPOSITORY_OWNER="${GITHUB_REPOSITORY%%/*}"
+          REPOSITORY_NAME="${GITHUB_REPOSITORY#*/}"
+
+          PROJECT_QUERY=$(cat <<'GRAPHQL'
+          query($owner: String!, $number: Int!) {
+            organization(login: $owner) {
+              projectV2(number: $number) {
+                ...ProjectData
+              }
+            }
+
+            user(login: $owner) {
+              projectV2(number: $number) {
+                ...ProjectData
+              }
+            }
+          }
+
+          fragment ProjectData on ProjectV2 {
+            id
+
+            fields(first: 100) {
+              nodes {
+                ... on ProjectV2Field {
+                  id
+                  name
+                }
+
+                ... on ProjectV2SingleSelectField {
+                  id
+                  name
+
+                  options {
+                    id
+                    name
+                  }
+                }
+              }
+            }
+          }
+          GRAPHQL
+          )
+
+          PROJECT_JSON="$(
+            gh api graphql \
+              -f query="$PROJECT_QUERY" \
+              -f owner="$PROJECT_OWNER" \
+              -F number="$PROJECT_NUMBER" \
+            | jq -c '.data.organization.projectV2 // .data.user.projectV2'
+          )"
+
+          if [[ "$PROJECT_JSON" == "null" ]]; then
+            echo "::error::Project $PROJECT_OWNER/$PROJECT_NUMBER not found."
+            exit 1
+          fi
+
+          PROJECT_ID="$(
+            jq -r '.id' <<< "$PROJECT_JSON"
+          )"
+
+          STATUS_FIELD_ID="$(
+            jq -r \
+              --arg field "$STATUS_FIELD_NAME" \
+              '
+              .fields.nodes[]
+              | select(
+                  (.name | ascii_downcase) == ($field | ascii_downcase)
+                  and has("options")
+                )
+              | .id
+              ' \
+              <<< "$PROJECT_JSON" \
+            | head -n 1
+          )"
+
+          IN_REVIEW_OPTION_ID="$(
+            jq -r \
+              --arg field "$STATUS_FIELD_NAME" \
+              --arg option "$IN_REVIEW_OPTION_NAME" \
+              '
+              .fields.nodes[]
+              | select(
+                  (.name | ascii_downcase) == ($field | ascii_downcase)
+                  and has("options")
+                )
+              | .options[]
+              | select(
+                  (.name | ascii_downcase) == ($option | ascii_downcase)
+                )
+              | .id
+              ' \
+              <<< "$PROJECT_JSON" \
+            | head -n 1
+          )"
+
+          if [[ -z "$STATUS_FIELD_ID" ]]; then
+            echo "::error::Field '$STATUS_FIELD_NAME' not found."
+            exit 1
+          fi
+
+          if [[ -z "$IN_REVIEW_OPTION_ID" ]]; then
+            echo "::error::Option '$IN_REVIEW_OPTION_NAME' not found."
+            exit 1
+          fi
+
+          ISSUE_QUERY=$(cat <<'GRAPHQL'
+          query(
+            $owner: String!,
+            $repository: String!,
+            $number: Int!
+          ) {
+            repository(owner: $owner, name: $repository) {
+              issue(number: $number) {
+                projectItems(first: 100) {
+                  nodes {
+                    id
+
+                    project {
+                      id
+                    }
+                  }
+                }
+              }
+            }
+          }
+          GRAPHQL
+          )
+
+          UPDATE_MUTATION=$(cat <<'GRAPHQL'
+          mutation(
+            $projectId: ID!,
+            $itemId: ID!,
+            $fieldId: ID!,
+            $optionId: String!
+          ) {
+            updateProjectV2ItemFieldValue(
+              input: {
+                projectId: $projectId
+                itemId: $itemId
+                fieldId: $fieldId
+                value: {
+                  singleSelectOptionId: $optionId
+                }
+              }
+            ) {
+              projectV2Item {
+                id
+              }
+            }
+          }
+          GRAPHQL
+          )
+
+          while IFS= read -r ISSUE_NUMBER; do
+            [[ -z "$ISSUE_NUMBER" ]] && continue
+
+            echo "Processing issue #$ISSUE_NUMBER..."
+
+            ISSUE_JSON="$(
+              gh api graphql \
+                -f query="$ISSUE_QUERY" \
+                -f owner="$REPOSITORY_OWNER" \
+                -f repository="$REPOSITORY_NAME" \
+                -F number="$ISSUE_NUMBER"
+            )"
+
+            ISSUE_EXISTS="$(
+              jq -r '.data.repository.issue != null' <<< "$ISSUE_JSON"
+            )"
+
+            if [[ "$ISSUE_EXISTS" != "true" ]]; then
+              echo "::warning::Issue #$ISSUE_NUMBER does not exist."
+              continue
+            fi
+
+            PROJECT_ITEM_ID="$(
+              jq -r \
+                --arg project_id "$PROJECT_ID" \
+                '
+                .data.repository.issue.projectItems.nodes[]
+                | select(.project.id == $project_id)
+                | .id
+                ' \
+                <<< "$ISSUE_JSON" \
+              | head -n 1
+            )"
+
+            if [[ -z "$PROJECT_ITEM_ID" ]]; then
+              echo "::warning::Issue #$ISSUE_NUMBER is not in project $PROJECT_NUMBER."
+              continue
+            fi
+
+            gh api graphql \
+              -f query="$UPDATE_MUTATION" \
+              -f projectId="$PROJECT_ID" \
+              -f itemId="$PROJECT_ITEM_ID" \
+              -f fieldId="$STATUS_FIELD_ID" \
+              -f optionId="$IN_REVIEW_OPTION_ID" \
+              --silent
+
+            echo "Issue #$ISSUE_NUMBER moved to '$IN_REVIEW_OPTION_NAME'."
+          done <<< "$ISSUE_NUMBERS"
