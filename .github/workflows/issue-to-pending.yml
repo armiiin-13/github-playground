@@ -119,36 +119,21 @@ jobs:
 
           PROJECT_QUERY=$(cat <<'GRAPHQL'
           query($owner: String!, $number: Int!) {
-            organization(login: $owner) {
-              projectV2(number: $number) {
-                ...ProjectData
-              }
-            }
-
             user(login: $owner) {
               projectV2(number: $number) {
-                ...ProjectData
-              }
-            }
-          }
+                id
 
-          fragment ProjectData on ProjectV2 {
-            id
+                fields(first: 100) {
+                  nodes {
+                    ... on ProjectV2SingleSelectField {
+                      id
+                      name
 
-            fields(first: 100) {
-              nodes {
-                ... on ProjectV2Field {
-                  id
-                  name
-                }
-
-                ... on ProjectV2SingleSelectField {
-                  id
-                  name
-
-                  options {
-                    id
-                    name
+                      options {
+                        id
+                        name
+                      }
+                    }
                   }
                 }
               }
@@ -162,7 +147,7 @@ jobs:
               -f query="$PROJECT_QUERY" \
               -f owner="$PROJECT_OWNER" \
               -F number="$PROJECT_NUMBER" \
-            | jq -c '.data.organization.projectV2 // .data.user.projectV2'
+            | jq -c '.data.user.projectV2'
           )"
 
           if [[ "$PROJECT_JSON" == "null" ]]; then
