@@ -84,18 +84,21 @@ jobs:
             jq -r '.id' <<< "$PROJECT_JSON"
           )"
 
+          PROJECT_ID="$(
+            jq -r '.id' <<< "$PROJECT_JSON"
+          )"
+
           STATUS_FIELD_ID="$(
             jq -r \
               --arg field "$STATUS_FIELD_NAME" \
               '
-              .fields.nodes[]
-              | select(
-                  (.name | ascii_downcase) == ($field | ascii_downcase)
-                )
-              | .id
+              [
+                .fields.nodes[]
+                | select(.name == $field)
+                | .id
+              ][0] // empty
               ' \
-              <<< "$PROJECT_JSON" \
-            | head -n 1
+              <<< "$PROJECT_JSON"
           )"
 
           DONE_OPTION_ID="$(
@@ -103,27 +106,24 @@ jobs:
               --arg field "$STATUS_FIELD_NAME" \
               --arg option "$DONE_OPTION_NAME" \
               '
-              .fields.nodes[]
-              | select(
-                  (.name | ascii_downcase) == ($field | ascii_downcase)
-                )
-              | .options[]
-              | select(
-                  (.name | ascii_downcase) == ($option | ascii_downcase)
-                )
-              | .id
+              [
+                .fields.nodes[]
+                | select(.name == $field)
+                | .options[]?
+                | select(.name == $option)
+                | .id
+              ][0] // empty
               ' \
-              <<< "$PROJECT_JSON" \
-            | head -n 1
+              <<< "$PROJECT_JSON"
           )"
 
           if [[ -z "$STATUS_FIELD_ID" ]]; then
-            echo "::error::Project field '${STATUS_FIELD_NAME}' not found."
+            echo "::error::Field '${STATUS_FIELD_NAME}' not found in the project."
             exit 1
           fi
 
           if [[ -z "$DONE_OPTION_ID" ]]; then
-            echo "::error::Status option '${DONE_OPTION_NAME}' not found."
+            echo "::error::Option '${DONE_OPTION_NAME}' not found."
             exit 1
           fi
 

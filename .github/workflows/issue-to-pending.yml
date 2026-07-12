@@ -163,15 +163,13 @@ jobs:
             jq -r \
               --arg field "$STATUS_FIELD_NAME" \
               '
-              .fields.nodes[]
-              | select(
-                  (.name | ascii_downcase) == ($field | ascii_downcase)
-                  and has("options")
-                )
-              | .id
+              [
+                .fields.nodes[]
+                | select(.name == $field)
+                | .id
+              ][0] // empty
               ' \
-              <<< "$PROJECT_JSON" \
-            | head -n 1
+              <<< "$PROJECT_JSON"
           )"
 
           IN_REVIEW_OPTION_ID="$(
@@ -179,19 +177,15 @@ jobs:
               --arg field "$STATUS_FIELD_NAME" \
               --arg option "$IN_REVIEW_OPTION_NAME" \
               '
-              .fields.nodes[]
-              | select(
-                  (.name | ascii_downcase) == ($field | ascii_downcase)
-                  and has("options")
-                )
-              | .options[]
-              | select(
-                  (.name | ascii_downcase) == ($option | ascii_downcase)
-                )
-              | .id
+              [
+                .fields.nodes[]
+                | select(.name == $field)
+                | .options[]?
+                | select(.name == $option)
+                | .id
+              ][0] // empty
               ' \
-              <<< "$PROJECT_JSON" \
-            | head -n 1
+              <<< "$PROJECT_JSON"
           )"
 
           if [[ -z "$STATUS_FIELD_ID" ]]; then
