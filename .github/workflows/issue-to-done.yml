@@ -210,12 +210,4 @@ jobs:
           GRAPHQL
           )
 
-          gh api graphql \
-            -f query="$UPDATE_MUTATION" \
-            -f projectId="$PROJECT_ID" \
-            -f itemId="$PROJECT_ITEM_ID" \
-            -f fieldId="$STATUS_FIELD_ID" \
-            -f optionId="$DONE_OPTION_ID" \
-            --silent
-
           echo "Issue #${ISSUE_NUMBER} moved to '${DONE_OPTION_NAME}'."
