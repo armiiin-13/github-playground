@@ -17,10 +17,7 @@ permissions:
   pull-requests: read
 
 env:
-  # Proyecto personal del propietario del repositorio.
   PROJECT_OWNER: ${{ github.repository_owner }}
-
-  # Pon aquí el mismo número que usas en los workflows anteriores.
   PROJECT_NUMBER: "3"
 
   STATUS_FIELD_NAME: "Status"
@@ -37,8 +34,7 @@ jobs:
 
     steps:
       # ---------------------------------------------------------
-      # Obtener el proyecto, el campo Status y las opciones
-      # Ready e In Progress.
+      # Get project, Status attribute and options Ready and In Progress
       # ---------------------------------------------------------
       - name: Get personal project data
         id: project
@@ -159,13 +155,9 @@ jobs:
           } >> "$GITHUB_OUTPUT"
 
       # ---------------------------------------------------------
-      # ISSUE ABIERTA O REABIERTA
+      # ISSUE OPEN OR REOPEN
       #
-      # Mueve la issue principal y todas sus subissues abiertas
-      # a Ready.
-      #
-      # El recorrido es recursivo: también procesa subissues de
-      # subissues.
+      # Moves issue and its open subissues to Ready
       # ---------------------------------------------------------
       - name: Move issue and sub-issues to Ready
         if: github.event_name == 'issues'
@@ -338,10 +330,9 @@ jobs:
           done
 
       # ---------------------------------------------------------
-      # PR ABIERTO O REABIERTO
+      # PR OPEN OR REOPEN
       #
-      # Busca las issues asociadas al PR y mueve únicamente esas
-      # issues a In Progress. No modifica sus subissues.
+      # Moves the issues linked to an open PR to In Progress
       # ---------------------------------------------------------
       - name: Move issues linked to pull request to In Progress
         if: github.event_name == 'pull_request_target'

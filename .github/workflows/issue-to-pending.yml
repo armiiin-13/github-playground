@@ -11,8 +11,6 @@ permissions:
 
 env:
   PROJECT_OWNER: ${{ github.repository_owner }}
-
-  # Pon aquí el número real de tu proyecto.
   PROJECT_NUMBER: "3"
 
   STATUS_FIELD_NAME: "Status"
@@ -30,8 +28,7 @@ jobs:
 
     steps:
       # ---------------------------------------------------------
-      # Detectar Closes #N, Fixes #N o Resolves #N
-      # en los commits enviados con el push.
+      # Detects Closes #N, Fixes #N o Resolves #N in pushed commits
       # ---------------------------------------------------------
       - name: Find referenced issues
         id: referenced-issues
@@ -95,7 +92,7 @@ jobs:
           echo "found=true" >> "$GITHUB_OUTPUT"
 
       # ---------------------------------------------------------
-      # Obtener el Project, el campo Status y la opción In review.
+      # Obtain project, Status attribute and Pending Merge option
       # ---------------------------------------------------------
       - name: Get project data
         if: steps.referenced-issues.outputs.found == 'true'
@@ -195,8 +192,7 @@ jobs:
           } >> "$GITHUB_OUTPUT"
 
       # ---------------------------------------------------------
-      # Comprobar que cada issue referenciada tiene padre.
-      # Solo entonces moverla a In review.
+      # Check if issue has a father, then move it to Pending Merge
       # ---------------------------------------------------------
       - name: Move referenced subissues to In review
         if: steps.referenced-issues.outputs.found == 'true'

@@ -10,12 +10,7 @@ permissions:
   issues: read
 
 env:
-  # Usuario u organización propietaria del proyecto
   PROJECT_OWNER: ${{ github.repository_owner }}
-
-  # Ejemplo:
-  # https://github.com/orgs/mi-org/projects/7
-  # PROJECT_NUMBER sería 7
   PROJECT_NUMBER: "3"
 
   STATUS_FIELD_NAME: "Status"
